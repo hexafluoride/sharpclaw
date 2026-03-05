@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
+using SharpClaw.ActivityWatch;
 using SharpClaw.Agent;
 using SharpClaw.Agents;
 using SharpClaw.Browser;
@@ -381,7 +382,7 @@ public static class Program
     // ── Tab completion ──────────────────────────────────────────────
 
     static readonly string[] SlashCmds =
-        ["/new", "/sessions", "/load", "/screen", "/history", "/tools", "/tool",
+        ["/new", "/sessions", "/load", "/screen", "/history", "/activity", "/tools", "/tool",
          "/agents", "/mailbox", "/info", "/help", "/quit", "/exit"];
 
     static bool TryTabComplete(StringBuilder buffer, ref int cursor)
@@ -409,7 +410,7 @@ public static class Program
     // ── Banner ──────────────────────────────────────────────────────
 
     static void PrintBanner(SharpClawConfig config, Mailbox mailbox, AgentScheduler scheduler,
-        ScreenAnalyzer analyzer, bool screenEnabled, bool daemonRunning = false)
+        ScreenAnalyzer analyzer, bool screenEnabled, bool daemonRunning = false, bool awAvailable = false)
     {
         Console.WriteLine();
 
@@ -433,6 +434,7 @@ public static class Program
         var ss = daemonRunning ? $"{Grn}daemon{R}" : screenEnabled ? $"{Grn}on{R}" : $"{Gry}off{R}";
         var extra = analyzer.ObservationCount > 0 ? $" {Gry}· {analyzer.ObservationCount} obs{R}" : "";
         Kv("screen", $"{ss}{extra}");
+        Kv("activitywatch", awAvailable ? $"{Grn}connected{R}" : $"{Gry}unavailable{R}");
 
         var agents = scheduler.ListAgents();
         var running = agents.Count(a => a.Status == AgentStatus.Running);
@@ -484,6 +486,9 @@ public static class Program
         var browserService = new BrowserService(config);
         var mailbox = new Mailbox(Path.Combine(config.ResolvedConfigDir, "mailbox.jsonl"), config.MaxMailboxMessages);
 
+        var awClient = new ActivityWatchClient(config.ActivityWatch);
+        var awAvailable = config.ActivityWatch.Enabled && await awClient.IsAvailableAsync();
+
         var toolRegistry = new ToolRegistry();
         toolRegistry.Register(new ReadFileTool(config.ResolvedWorkspace));
         toolRegistry.Register(new WriteFileTool(config.ResolvedWorkspace));
@@ -493,6 +498,8 @@ public static class Program
         toolRegistry.Register(new TakeScreenshotTool(screenCapture, screenAnalyzer));
         toolRegistry.Register(new MemoryTool(config.ResolvedWorkspace, config.ResolvedArchiveDir));
         toolRegistry.Register(new BrowserTool(browserService, config));
+        if (awAvailable)
+            toolRegistry.Register(new ActivityWatchTool(awClient));
 
         var notifications = new NotificationBus(config.MaxNotifications);
         var agentScheduler = new AgentScheduler(config, llmClient, toolRegistry, mailbox, notifications);
@@ -506,13 +513,13 @@ public static class Program
         if (config.Screen.Enabled && !daemonRunning)
             await screenCapture.StartAsync();
 
-        PrintBanner(config, mailbox, agentScheduler, screenAnalyzer, config.Screen.Enabled, daemonRunning);
+        PrintBanner(config, mailbox, agentScheduler, screenAnalyzer, config.Screen.Enabled, daemonRunning, awAvailable);
         PrintHelp();
 
         try
         {
             await RunRepl(config, runtime, sessionManager, screenCapture, screenAnalyzer,
-                toolRegistry, mailbox, agentScheduler, notifications);
+                toolRegistry, mailbox, agentScheduler, notifications, awAvailable ? awClient : null);
         }
         finally
         {
@@ -530,7 +537,7 @@ public static class Program
         SharpClawConfig config, AgentRuntime runtime, SessionManager sessionManager,
         ScreenCaptureService screenCapture, ScreenAnalyzer screenAnalyzer,
         ToolRegistry toolRegistry, Mailbox mailbox, AgentScheduler agentScheduler,
-        NotificationBus notifications)
+        NotificationBus notifications, ActivityWatchClient? awClient = null)
     {
         var historyPath = Path.Combine(config.ResolvedConfigDir, "prompt-history.txt");
         var promptHistory = new PromptHistory(historyPath);
@@ -559,7 +566,7 @@ public static class Program
             if (input.StartsWith('/'))
             {
                 if (!await HandleCommand(input, config, runtime, sessionManager,
-                        screenCapture, screenAnalyzer, toolRegistry, mailbox, agentScheduler))
+                        screenCapture, screenAnalyzer, toolRegistry, mailbox, agentScheduler, awClient))
                     break;
                 continue;
             }
@@ -734,7 +741,8 @@ public static class Program
         string input, SharpClawConfig config, AgentRuntime runtime,
         SessionManager sessionManager, ScreenCaptureService screenCapture,
         ScreenAnalyzer screenAnalyzer, ToolRegistry toolRegistry,
-        Mailbox mailbox, AgentScheduler agentScheduler)
+        Mailbox mailbox, AgentScheduler agentScheduler,
+        ActivityWatchClient? awClient = null)
     {
         var parts = input.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
         var cmd = parts[0].ToLowerInvariant();
@@ -821,6 +829,63 @@ public static class Program
                     var d = o.Timestamp.ToString("yyyy-MM-dd");
                     if (d != lastDate) { Console.Write($"\n  {Cyn}{d}{R}\n"); lastDate = d; }
                     Console.Write($"  {Gry}│ {o.Timestamp:HH:mm:ss}{R}  {o.Description}\n");
+                }
+                return true;
+            }
+
+            case "/activity":
+            {
+                if (awClient is null)
+                { Console.Write($"  {Ylw}ActivityWatch not available.{R} Is aw-server running?\n"); return true; }
+
+                var sub = parts.Length > 1 ? parts[1].ToLowerInvariant() : "summary";
+                var hours = 24.0;
+                if (parts.Length > 2 && double.TryParse(parts[1], out var h))
+                    { hours = h; sub = parts.Length > 2 ? parts[2].ToLowerInvariant() : "summary"; }
+
+                try
+                {
+                    var end = DateTimeOffset.Now;
+                    var start = end.AddHours(-hours);
+
+                    if (sub is "web" or "browse")
+                    {
+                        var events = await awClient.GetWebSummaryAsync(start, end);
+                        if (events.Count == 0) { Console.Write($"  {Gry}No web data.{R}\n"); return true; }
+                        Console.Write($"\n  {Wht}Web Browsing{R} {Gry}(last {hours}h){R}\n");
+                        Console.Write($"  {D}───────────────────────────────────{R}\n");
+                        var totalSec = events.Sum(e => e.Duration);
+                        foreach (var ev in events.Take(20))
+                        {
+                            var title = ev.Data.TryGetProperty("title", out var t) ? t.GetString() ?? "" : "";
+                            if (title.Length > 60) title = title[..57] + "...";
+                            var dur = ev.Duration < 60 ? $"{ev.Duration:0}s" : ev.Duration < 3600 ? $"{ev.Duration / 60:0.0}m" : $"{ev.Duration / 3600:0.0}h";
+                            Console.Write($"  {Gry}│{R} {dur,7}  {title}\n");
+                        }
+                        Console.Write($"  {Gry}total: {totalSec / 3600:0.0}h across {events.Count} sites{R}\n");
+                    }
+                    else
+                    {
+                        var events = await awClient.GetActiveWindowSummaryAsync(start, end);
+                        if (events.Count == 0) { Console.Write($"  {Gry}No window data.{R}\n"); return true; }
+                        Console.Write($"\n  {Wht}Window Activity{R} {Gry}(last {hours}h){R}\n");
+                        Console.Write($"  {D}───────────────────────────────────{R}\n");
+                        var totalSec = events.Sum(e => e.Duration);
+                        foreach (var ev in events.Take(20))
+                        {
+                            var app = ev.Data.TryGetProperty("app", out var a) ? a.GetString() ?? "" : "";
+                            var title = ev.Data.TryGetProperty("title", out var t) ? t.GetString() ?? "" : "";
+                            if (title.Length > 50) title = title[..47] + "...";
+                            var dur = ev.Duration < 60 ? $"{ev.Duration:0}s" : ev.Duration < 3600 ? $"{ev.Duration / 60:0.0}m" : $"{ev.Duration / 3600:0.0}h";
+                            var pct = totalSec > 0 ? ev.Duration / totalSec * 100 : 0;
+                            Console.Write($"  {Gry}│{R} {dur,7} {pct,4:0}%  {Cyn}{app}{R} {Gry}—{R} {title}\n");
+                        }
+                        Console.Write($"  {Gry}total active: {totalSec / 3600:0.0}h across {events.Count} entries{R}\n");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.Write($"  {Ylw}Error:{R} {ex.Message}\n");
                 }
                 return true;
             }
@@ -939,6 +1004,7 @@ public static class Program
                 Kv("mailbox", mailbox.UnreadCount > 0
                     ? $"{BMag}{mailbox.UnreadCount} unread{R}{Gry} / {mailbox.TotalCount} total{R}"
                     : $"{Gry}{mailbox.TotalCount} messages{R}");
+                Kv("activitywatch", awClient is not null ? $"{Grn}connected{R}" : $"{Gry}unavailable{R}");
                 return true;
             }
 
@@ -972,6 +1038,7 @@ public static class Program
         Sec("monitor");
         Cmd("/screen [on|off|status]", "toggle screen watching / check daemon");
         Cmd("/history [n]", "screen observation log");
+        Cmd("/activity [web] [hours]", "ActivityWatch summary (default: 24h windows)");
 
         Sec("tools & agents");
         Cmd("/tools", "list available tools");

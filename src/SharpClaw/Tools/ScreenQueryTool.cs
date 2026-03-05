@@ -68,7 +68,11 @@ public class ScreenQueryTool : ITool
         sb.AppendLine($"Screen activity (last {minutesBack} minutes, {observations.Count} observations):");
         sb.AppendLine();
         foreach (var obs in observations)
-            sb.AppendLine($"[{obs.Timestamp:yyyy-MM-dd HH:mm:ss}] {obs.Description}");
+        {
+            sb.Append($"[{obs.Timestamp:yyyy-MM-dd HH:mm:ss}] {obs.Description}");
+            AppendAwContext(sb, obs);
+            sb.AppendLine();
+        }
 
         return sb.ToString().TrimEnd();
     }
@@ -103,12 +107,15 @@ public class ScreenQueryTool : ITool
         sb.AppendLine($"Screen activity from {from:yyyy-MM-dd HH:mm} to {to:yyyy-MM-dd HH:mm} ({observations.Count} observations):");
         sb.AppendLine();
 
-        // Group by day for readability
         foreach (var dayGroup in observations.GroupBy(o => o.Timestamp.Date))
         {
             sb.AppendLine($"  {dayGroup.Key:yyyy-MM-dd} ({dayGroup.Count()} observations):");
             foreach (var obs in dayGroup)
-                sb.AppendLine($"    [{obs.Timestamp:HH:mm:ss}] {obs.Description}");
+            {
+                sb.Append($"    [{obs.Timestamp:HH:mm:ss}] {obs.Description}");
+                AppendAwContext(sb, obs);
+                sb.AppendLine();
+            }
             sb.AppendLine();
         }
 
@@ -121,6 +128,16 @@ public class ScreenQueryTool : ITool
         return observations
             .Where(o => keywords.Any(k => o.Description.Contains(k, StringComparison.OrdinalIgnoreCase)))
             .ToList();
+    }
+
+    private static void AppendAwContext(StringBuilder sb, ScreenObservation obs)
+    {
+        var parts = new List<string>();
+        if (obs.ActiveApp is not null) parts.Add($"app={obs.ActiveApp}");
+        if (obs.ActiveUrl is not null) parts.Add($"url={obs.ActiveUrl}");
+        else if (obs.ActiveTitle is not null) parts.Add($"title={obs.ActiveTitle}");
+        if (obs.IsAfk == true) parts.Add("afk");
+        if (parts.Count > 0) sb.Append($" [{string.Join(", ", parts)}]");
     }
 
     private static bool TryParseDate(string input, out DateTimeOffset result)

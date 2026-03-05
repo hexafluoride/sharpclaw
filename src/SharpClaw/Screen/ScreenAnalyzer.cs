@@ -43,6 +43,13 @@ public class ScreenAnalyzer : IDisposable
     /// </summary>
     public async Task OnScreenCaptured(byte[] imageData, string imageHash)
     {
+        await OnScreenCaptured(imageData, imageHash, null, null, null, null);
+    }
+
+    public async Task OnScreenCaptured(
+        byte[] imageData, string imageHash,
+        string? activeApp, string? activeTitle, string? activeUrl, bool? isAfk)
+    {
         if (imageHash == _lastImageHash)
             return;
         _lastImageHash = imageHash;
@@ -56,7 +63,11 @@ public class ScreenAnalyzer : IDisposable
             {
                 Timestamp = DateTimeOffset.Now,
                 Description = description.Trim(),
-                ImageHash = imageHash
+                ImageHash = imageHash,
+                ActiveApp = activeApp,
+                ActiveTitle = activeTitle,
+                ActiveUrl = activeUrl,
+                IsAfk = isAfk
             });
         }
         catch (Exception ex)

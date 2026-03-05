@@ -12,4 +12,16 @@ public record ScreenObservation
 
     [JsonPropertyName("hash")]
     public required string ImageHash { get; init; }
+
+    [JsonPropertyName("activeApp")]
+    public string? ActiveApp { get; init; }
+
+    [JsonPropertyName("activeTitle")]
+    public string? ActiveTitle { get; init; }
+
+    [JsonPropertyName("activeUrl")]
+    public string? ActiveUrl { get; init; }
+
+    [JsonPropertyName("afk")]
+    public bool? IsAfk { get; init; }
 }

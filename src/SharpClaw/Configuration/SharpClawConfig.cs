@@ -18,6 +18,18 @@ public class ScreenConfig
     public string CaptureCommand { get; set; } = "auto";
 }
 
+public class ActivityWatchConfig
+{
+    [JsonPropertyName("enabled")]
+    public bool Enabled { get; set; } = true;
+
+    [JsonPropertyName("url")]
+    public string Url { get; set; } = "http://localhost:5600";
+
+    [JsonPropertyName("timeoutSeconds")]
+    public int TimeoutSeconds { get; set; } = 10;
+}
+
 public class BrowserConfig
 {
     [JsonPropertyName("headless")]
@@ -79,6 +91,9 @@ public class SharpClawConfig
 
     [JsonPropertyName("screen")]
     public ScreenConfig Screen { get; set; } = new();
+
+    [JsonPropertyName("activityWatch")]
+    public ActivityWatchConfig ActivityWatch { get; set; } = new();
 
     [JsonPropertyName("browser")]
     public BrowserConfig Browser { get; set; } = new();

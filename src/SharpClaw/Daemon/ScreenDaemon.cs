@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using SharpClaw.ActivityWatch;
 using SharpClaw.Configuration;
 using SharpClaw.Logging;
 using SharpClaw.Screen;
@@ -9,6 +10,8 @@ namespace SharpClaw.Daemon;
 /// Headless screen capture daemon. Runs the capture service and analyzer
 /// without any TUI, agent runtime, or tools. Writes observations to the
 /// shared screen-history.jsonl so the TUI and agents can read them.
+/// When ActivityWatch is available, enriches each observation with the
+/// current app, window title, URL, and AFK status from AW.
 /// Managed as a systemd user service.
 /// </summary>
 public static class ScreenDaemon
@@ -48,8 +51,69 @@ public static class ScreenDaemon
         log.LogInformation("Screen daemon starting (interval: {Interval}s, model: {Model})",
             config.Screen.CaptureIntervalSeconds, config.VisionModel);
 
+        ActivityWatchClient? awClient = null;
+        if (config.ActivityWatch.Enabled)
+        {
+            awClient = new ActivityWatchClient(config.ActivityWatch);
+            if (await awClient.IsAvailableAsync())
+                log.LogInformation("ActivityWatch connected at {Url}", config.ActivityWatch.Url);
+            else
+            {
+                log.LogWarning("ActivityWatch not reachable at {Url}, continuing without enrichment",
+                    config.ActivityWatch.Url);
+                awClient.Dispose();
+                awClient = null;
+            }
+        }
+
         var analyzer = new ScreenAnalyzer(config);
-        var capture = new ScreenCaptureService(config.Screen, analyzer.OnScreenCaptured);
+
+        async Task OnCapture(byte[] imageData, string hash)
+        {
+            string? app = null, title = null, url = null;
+            bool? isAfk = null;
+
+            if (awClient is not null)
+            {
+                try
+                {
+                    var windowBucket = await awClient.FindBucketAsync("aw-watcher-window");
+                    if (windowBucket is not null)
+                    {
+                        var events = await awClient.GetEventsAsync(windowBucket, limit: 1);
+                        if (events.Count > 0)
+                        {
+                            var d = events[0].Data;
+                            app = d.TryGetProperty("app", out var a) ? a.GetString() : null;
+                            title = d.TryGetProperty("title", out var t) ? t.GetString() : null;
+                        }
+                    }
+
+                    var webBucket = await awClient.FindBucketAsync("aw-watcher-web");
+                    if (webBucket is not null)
+                    {
+                        var events = await awClient.GetEventsAsync(webBucket, limit: 1);
+                        if (events.Count > 0)
+                        {
+                            var d = events[0].Data;
+                            url = d.TryGetProperty("url", out var u) ? u.GetString() : null;
+                        }
+                    }
+
+                    var afkStatus = await awClient.GetAfkStatusAsync();
+                    if (afkStatus.HasValue)
+                        isAfk = afkStatus.Value.isAfk;
+                }
+                catch (Exception ex)
+                {
+                    log.LogDebug("AW enrichment failed: {Err}", ex.Message);
+                }
+            }
+
+            await analyzer.OnScreenCaptured(imageData, hash, app, title, url, isAfk);
+        }
+
+        var capture = new ScreenCaptureService(config.Screen, OnCapture);
 
         using var cts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
@@ -75,6 +139,7 @@ public static class ScreenDaemon
         capture.Stop();
         capture.Dispose();
         analyzer.Dispose();
+        awClient?.Dispose();
         TryCleanPid();
         return 0;
     }
