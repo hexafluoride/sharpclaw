@@ -13,7 +13,7 @@ namespace SharpClaw.Tools;
 /// DOM interaction (selectors, JS evaluation, text/html extraction), and tab management.
 /// Browser state (cookies, localStorage, sessions) persists across restarts.
 /// </summary>
-public class BrowserTool : ITool
+public class BrowserTool : ITool, IDisposable
 {
     private readonly BrowserService _browser;
     private readonly SharpClawConfig _config;
@@ -287,5 +287,11 @@ public class BrowserTool : ITool
             if (v.ValueKind == JsonValueKind.False) return false;
         }
         return null;
+    }
+
+    public void Dispose()
+    {
+        _visionClient.Dispose();
+        GC.SuppressFinalize(this);
     }
 }

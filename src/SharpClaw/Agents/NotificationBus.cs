@@ -3,13 +3,19 @@ using System.Collections.Concurrent;
 namespace SharpClaw.Agents;
 
 /// <summary>
-/// Thread-safe notification queue for background agent updates.
+/// Thread-safe bounded notification queue for background agent updates.
 /// Agents and the scheduler post messages here; the REPL drains
 /// and displays them when the user is idle (empty input buffer).
 /// </summary>
 public class NotificationBus
 {
     private readonly ConcurrentQueue<Notification> _queue = new();
+    private readonly int _maxSize;
+
+    public NotificationBus(int maxSize = 200)
+    {
+        _maxSize = maxSize;
+    }
 
     public void Post(string agentName, string message)
     {
@@ -19,6 +25,9 @@ public class NotificationBus
             AgentName = agentName,
             Message = message
         });
+
+        while (_queue.Count > _maxSize)
+            _queue.TryDequeue(out _);
     }
 
     public bool TryDequeue(out Notification? notification)

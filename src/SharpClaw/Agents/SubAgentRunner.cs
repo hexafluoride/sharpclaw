@@ -1,8 +1,10 @@
 using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
 using SharpClaw.Configuration;
 using SharpClaw.LLM;
 using SharpClaw.LLM.Models;
+using SharpClaw.Logging;
 using SharpClaw.Tools;
 
 namespace SharpClaw.Agents;
@@ -19,6 +21,7 @@ public class SubAgentRunner
     private readonly LlamaCppClient _llmClient;
     private readonly ToolRegistry _toolRegistry;
     private readonly string _agentDir;
+    private readonly ILogger _log = Log.For<SubAgentRunner>();
 
     public SubAgentRunner(
         SharpClawConfig config,
@@ -50,7 +53,7 @@ public class SubAgentRunner
 
         var messages = new List<Message> { Message.System(systemPrompt) };
 
-        var history = LoadRecentHistory();
+        var history = LoadRecentHistory(_config.SubAgentHistoryMessages);
         messages.AddRange(history);
 
         var goal = goalOverride ?? BuildGoalMessage(agentConfig);
@@ -308,7 +311,7 @@ public class SubAgentRunner
         if (!File.Exists(memoryPath)) return;
 
         var memory = File.ReadAllText(memoryPath);
-        if (memory.Length <= 4000) return;
+        if (memory.Length <= _config.MemoryCompactionThreshold) return;
 
         try
         {
@@ -332,16 +335,16 @@ public class SubAgentRunner
             if (!string.IsNullOrWhiteSpace(compacted) && compacted.Length < memory.Length)
             {
                 File.WriteAllText(memoryPath, compacted);
-                Console.Error.WriteLine($"[agent:{agent.Id}] Compacted memory: {memory.Length} -> {compacted.Length} chars");
+                _log.LogInformation("Agent {AgentId}: compacted memory {OldLen} -> {NewLen} chars", agent.Id, memory.Length, compacted.Length);
             }
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"[agent:{agent.Id}] Memory compaction failed: {ex.Message}");
+            _log.LogWarning(ex, "Agent {AgentId}: memory compaction failed", agent.Id);
         }
     }
 
-    private List<Message> LoadRecentHistory()
+    private List<Message> LoadRecentHistory(int maxMessages = 20)
     {
         var historyPath = Path.Combine(_agentDir, "history.jsonl");
         if (!File.Exists(historyPath)) return [];
@@ -350,7 +353,7 @@ public class SubAgentRunner
         {
             var lines = File.ReadAllLines(historyPath);
             var messages = new List<Message>();
-            foreach (var line in lines.TakeLast(20))
+            foreach (var line in lines.TakeLast(maxMessages))
             {
                 if (string.IsNullOrWhiteSpace(line)) continue;
                 try
@@ -377,7 +380,7 @@ public class SubAgentRunner
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"[agent] Failed to save history: {ex.Message}");
+            _log.LogWarning(ex, "Failed to save agent history");
         }
     }
 

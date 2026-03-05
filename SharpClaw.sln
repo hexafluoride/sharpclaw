@@ -7,6 +7,10 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{C70CCB6B-B40
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SharpClaw", "src\SharpClaw\SharpClaw.csproj", "{A2124BBB-86D2-4572-BE4B-7CEADF1707F5}"
 EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{706D6ECB-392A-4C2F-B734-15EBFEA57598}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SharpClaw.Tests", "tests\SharpClaw.Tests\SharpClaw.Tests.csproj", "{A2EB7A4B-9D8A-4F22-9DBB-1E71A9B791D1}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -20,8 +24,13 @@ Global
 		{A2124BBB-86D2-4572-BE4B-7CEADF1707F5}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{A2124BBB-86D2-4572-BE4B-7CEADF1707F5}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{A2124BBB-86D2-4572-BE4B-7CEADF1707F5}.Release|Any CPU.Build.0 = Release|Any CPU
+		{A2EB7A4B-9D8A-4F22-9DBB-1E71A9B791D1}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A2EB7A4B-9D8A-4F22-9DBB-1E71A9B791D1}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A2EB7A4B-9D8A-4F22-9DBB-1E71A9B791D1}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A2EB7A4B-9D8A-4F22-9DBB-1E71A9B791D1}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{A2124BBB-86D2-4572-BE4B-7CEADF1707F5} = {C70CCB6B-B40F-402C-9844-0889E0C0D5B7}
+		{A2EB7A4B-9D8A-4F22-9DBB-1E71A9B791D1} = {706D6ECB-392A-4C2F-B734-15EBFEA57598}
 	EndGlobalSection
 EndGlobal

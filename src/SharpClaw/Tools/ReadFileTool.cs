@@ -26,7 +26,10 @@ public class ReadFileTool : ITool
         var path = arguments.GetProperty("path").GetString()
             ?? throw new ArgumentException("Missing 'path' parameter");
 
-        var resolved = ResolvePath(path);
+        var resolved = ResolveSafePath(path);
+        if (resolved == null)
+            return $"Error: Path must be within workspace ({_workspaceDir})";
+
         if (!File.Exists(resolved))
             return $"Error: File not found: {path}";
 
@@ -38,9 +41,14 @@ public class ReadFileTool : ITool
         return content;
     }
 
-    private string ResolvePath(string path)
+    private string? ResolveSafePath(string path)
     {
-        if (Path.IsPathRooted(path)) return path;
-        return Path.GetFullPath(Path.Combine(_workspaceDir, path));
+        var resolved = Path.IsPathRooted(path)
+            ? Path.GetFullPath(path)
+            : Path.GetFullPath(Path.Combine(_workspaceDir, path));
+        var root = Path.GetFullPath(_workspaceDir).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        if (!resolved.StartsWith(root) && resolved != root.TrimEnd(Path.DirectorySeparatorChar))
+            return null;
+        return resolved;
     }
 }

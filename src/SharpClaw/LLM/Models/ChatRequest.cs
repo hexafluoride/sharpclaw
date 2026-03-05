@@ -20,4 +20,16 @@ public class ChatRequest
     [JsonPropertyName("temperature")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public double? Temperature { get; set; }
+
+    [JsonPropertyName("max_tokens")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? MaxTokens { get; set; }
+
+    [JsonPropertyName("top_p")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public double? TopP { get; set; }
+
+    [JsonPropertyName("stop")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<string>? Stop { get; set; }
 }

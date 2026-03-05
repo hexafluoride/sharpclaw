@@ -1,11 +1,14 @@
 using System.Diagnostics;
 using System.Text;
 using System.Text.RegularExpressions;
+using Microsoft.Extensions.Logging;
 using SharpClaw.Agent;
 using SharpClaw.Agents;
 using SharpClaw.Browser;
 using SharpClaw.Configuration;
+using SharpClaw.Daemon;
 using SharpClaw.LLM;
+using SharpClaw.Logging;
 using SharpClaw.Screen;
 using SharpClaw.Sessions;
 using SharpClaw.Tools;
@@ -406,7 +409,7 @@ public static class Program
     // ── Banner ──────────────────────────────────────────────────────
 
     static void PrintBanner(SharpClawConfig config, Mailbox mailbox, AgentScheduler scheduler,
-        ScreenAnalyzer analyzer, bool screenEnabled)
+        ScreenAnalyzer analyzer, bool screenEnabled, bool daemonRunning = false)
     {
         Console.WriteLine();
 
@@ -427,7 +430,7 @@ public static class Program
         Kv("server", config.LlamaCppUrl);
         Kv("workspace", config.ResolvedWorkspace);
 
-        var ss = screenEnabled ? $"{Grn}on{R}" : $"{Gry}off{R}";
+        var ss = daemonRunning ? $"{Grn}daemon{R}" : screenEnabled ? $"{Grn}on{R}" : $"{Gry}off{R}";
         var extra = analyzer.ObservationCount > 0 ? $" {Gry}· {analyzer.ObservationCount} obs{R}" : "";
         Kv("screen", $"{ss}{extra}");
 
@@ -453,28 +456,45 @@ public static class Program
     {
         Console.OutputEncoding = Encoding.UTF8;
 
+        var isDaemon = args.Any(a => a is "--daemon" or "daemon");
+        var logLevel = isDaemon ? LogLevel.Information : LogLevel.Warning;
+
+        var loggerFactory = LoggerFactory.Create(builder =>
+        {
+            builder.SetMinimumLevel(logLevel);
+            builder.AddSimpleConsole(opts =>
+            {
+                opts.SingleLine = true;
+                opts.TimestampFormat = "HH:mm:ss ";
+            });
+        });
+        Log.Init(loggerFactory);
+
+        if (isDaemon)
+            return await ScreenDaemon.RunAsync(args);
+
         var config = SharpClawConfig.Load();
         config.EnsureDirectories();
         BootstrapLoader.CreateDefaultBootstrapFiles(config.ResolvedWorkspace);
 
-        using var llmClient = new LlamaCppClient(config.LlamaCppUrl);
+        using var llmClient = new LlamaCppClient(config.LlamaCppUrl, config.LlmRetryCount, config.LlmRetryBaseDelayMs);
         var sessionManager = new SessionManager(config.ResolvedSessionsDir);
         var screenAnalyzer = new ScreenAnalyzer(config);
         var screenCapture = new ScreenCaptureService(config.Screen, screenAnalyzer.OnScreenCaptured);
         var browserService = new BrowserService(config);
-        var mailbox = new Mailbox(Path.Combine(config.ResolvedConfigDir, "mailbox.jsonl"));
+        var mailbox = new Mailbox(Path.Combine(config.ResolvedConfigDir, "mailbox.jsonl"), config.MaxMailboxMessages);
 
         var toolRegistry = new ToolRegistry();
         toolRegistry.Register(new ReadFileTool(config.ResolvedWorkspace));
         toolRegistry.Register(new WriteFileTool(config.ResolvedWorkspace));
-        toolRegistry.Register(new ShellExecTool(config.ResolvedWorkspace));
+        toolRegistry.Register(new ShellExecTool(config.ResolvedWorkspace, config.ShellTimeoutSeconds));
         toolRegistry.Register(new ListDirectoryTool(config.ResolvedWorkspace));
         toolRegistry.Register(new ScreenQueryTool(screenAnalyzer));
         toolRegistry.Register(new TakeScreenshotTool(screenCapture, screenAnalyzer));
         toolRegistry.Register(new MemoryTool(config.ResolvedWorkspace, config.ResolvedArchiveDir));
         toolRegistry.Register(new BrowserTool(browserService, config));
 
-        var notifications = new NotificationBus();
+        var notifications = new NotificationBus(config.MaxNotifications);
         var agentScheduler = new AgentScheduler(config, llmClient, toolRegistry, mailbox, notifications);
         toolRegistry.Register(new AgentTool(agentScheduler, mailbox));
         agentScheduler.Start();
@@ -482,10 +502,11 @@ public static class Program
         var systemPrompt = BootstrapLoader.BuildSystemPrompt(config.ResolvedWorkspace);
         var runtime = new AgentRuntime(config, llmClient, toolRegistry, sessionManager, systemPrompt);
 
-        if (config.Screen.Enabled)
+        var daemonRunning = ScreenDaemon.IsRunning();
+        if (config.Screen.Enabled && !daemonRunning)
             await screenCapture.StartAsync();
 
-        PrintBanner(config, mailbox, agentScheduler, screenAnalyzer, config.Screen.Enabled);
+        PrintBanner(config, mailbox, agentScheduler, screenAnalyzer, config.Screen.Enabled, daemonRunning);
         PrintHelp();
 
         try
@@ -757,16 +778,21 @@ public static class Program
                 switch (sub)
                 {
                     case "on":
+                        if (ScreenDaemon.IsRunning())
+                        { Console.Write($"  {Grn}✓{R} Screen daemon is handling captures\n"); break; }
                         screenCapture.Resume();
                         if (!screenCapture.IsRunning) await screenCapture.StartAsync();
                         Console.Write($"  {Grn}✓{R} Screen monitoring resumed\n");
                         break;
                     case "off":
+                        if (ScreenDaemon.IsRunning())
+                        { Console.Write($"  {Ylw}▸{R} Stop the daemon with: systemctl --user stop sharpclaw-screen\n"); break; }
                         screenCapture.Pause();
                         Console.Write($"  {Ylw}▸{R} Screen monitoring paused\n");
                         break;
                     case "status":
-                        var st = screenCapture.IsPaused ? $"{Ylw}paused{R}" : $"{Grn}active{R}";
+                        var dm = ScreenDaemon.IsRunning();
+                        var st = dm ? $"{Grn}daemon{R}" : screenCapture.IsPaused ? $"{Ylw}paused{R}" : $"{Grn}active{R}";
                         Console.Write($"  {Gry}screen{R}        {st}\n");
                         Console.Write($"  {Gry}observations{R}  {screenAnalyzer.ObservationCount}\n");
                         var lat = screenAnalyzer.GetLatest();
@@ -944,7 +970,7 @@ public static class Program
         Cmd("/load <id>", "restore a session");
 
         Sec("monitor");
-        Cmd("/screen [on|off]", "toggle screen watching");
+        Cmd("/screen [on|off|status]", "toggle screen watching / check daemon");
         Cmd("/history [n]", "screen observation log");
 
         Sec("tools & agents");

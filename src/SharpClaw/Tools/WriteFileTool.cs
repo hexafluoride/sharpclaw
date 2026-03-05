@@ -29,7 +29,10 @@ public class WriteFileTool : ITool
         var content = arguments.GetProperty("content").GetString()
             ?? throw new ArgumentException("Missing 'content' parameter");
 
-        var resolved = ResolvePath(path);
+        var resolved = ResolveSafePath(path);
+        if (resolved == null)
+            return $"Error: Path must be within workspace ({_workspaceDir})";
+
         var dir = Path.GetDirectoryName(resolved);
         if (dir is not null)
             Directory.CreateDirectory(dir);
@@ -38,9 +41,14 @@ public class WriteFileTool : ITool
         return $"Successfully wrote {content.Length} characters to {path}";
     }
 
-    private string ResolvePath(string path)
+    private string? ResolveSafePath(string path)
     {
-        if (Path.IsPathRooted(path)) return path;
-        return Path.GetFullPath(Path.Combine(_workspaceDir, path));
+        var resolved = Path.IsPathRooted(path)
+            ? Path.GetFullPath(path)
+            : Path.GetFullPath(Path.Combine(_workspaceDir, path));
+        var root = Path.GetFullPath(_workspaceDir).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        if (!resolved.StartsWith(root) && resolved != root.TrimEnd(Path.DirectorySeparatorChar))
+            return null;
+        return resolved;
     }
 }

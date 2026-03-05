@@ -77,6 +77,30 @@ public class SessionManager
             _messages.Insert(0, sysMsg);
     }
 
+    /// <summary>
+    /// Remove messages from startIndex to endIndex (exclusive), replacing them
+    /// with a single summary message. Used for context window compaction.
+    /// </summary>
+    public void TrimMessages(int startIndex, int endIndex, Message replacement)
+    {
+        if (startIndex < 0 || endIndex > _messages.Count || startIndex >= endIndex)
+            return;
+        _messages.RemoveRange(startIndex, endIndex - startIndex);
+        _messages.Insert(startIndex, replacement);
+        FlushSession();
+    }
+
+    private void FlushSession()
+    {
+        var path = GetSessionPath(_sessionId);
+        var lines = _messages.Select(m =>
+        {
+            var entry = new SessionEntry { Timestamp = DateTimeOffset.UtcNow, Message = m };
+            return JsonSerializer.Serialize(entry, JsonOpts);
+        });
+        File.WriteAllText(path, string.Join("\n", lines) + "\n");
+    }
+
     public List<string> ListSessions()
     {
         if (!Directory.Exists(_sessionsDir))

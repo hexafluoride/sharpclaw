@@ -1,5 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Microsoft.Extensions.Logging;
+using SharpClaw.Logging;
 
 namespace SharpClaw.Agents;
 
@@ -36,15 +38,18 @@ public class Mailbox
     private readonly string _path;
     private readonly List<MailMessage> _messages = [];
     private readonly object _lock = new();
+    private readonly int _maxMessages;
+    private readonly ILogger _log = Log.For<Mailbox>();
 
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
     };
 
-    public Mailbox(string path)
+    public Mailbox(string path, int maxMessages = 500)
     {
         _path = path;
+        _maxMessages = maxMessages;
         Load();
     }
 
@@ -53,7 +58,16 @@ public class Mailbox
         lock (_lock)
         {
             _messages.Add(message);
-            Append(message);
+            if (_messages.Count > _maxMessages)
+            {
+                var excess = _messages.Count - _maxMessages;
+                _messages.RemoveRange(0, excess);
+                Flush();
+            }
+            else
+            {
+                Append(message);
+            }
         }
     }
 
@@ -144,7 +158,7 @@ public class Mailbox
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"[mailbox] Failed to load: {ex.Message}");
+            _log.LogWarning(ex, "Failed to load mailbox from {Path}", _path);
         }
     }
 
@@ -159,7 +173,7 @@ public class Mailbox
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"[mailbox] Failed to append: {ex.Message}");
+            _log.LogWarning(ex, "Failed to append to mailbox");
         }
     }
 
@@ -174,7 +188,7 @@ public class Mailbox
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"[mailbox] Failed to flush: {ex.Message}");
+            _log.LogWarning(ex, "Failed to flush mailbox");
         }
     }
 }

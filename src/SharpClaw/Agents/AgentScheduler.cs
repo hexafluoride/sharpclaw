@@ -23,7 +23,10 @@ public class AgentScheduler : IAsyncDisposable
     private readonly ConcurrentDictionary<string, SubAgentConfig> _agents = new();
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _scheduledCts = new();
     private readonly ConcurrentDictionary<string, Task> _runningTasks = new();
+    private readonly ConcurrentDictionary<string, object> _agentLocks = new();
     private readonly SemaphoreSlim _llmSemaphore = new(1, 1);
+
+    public SemaphoreSlim LlmSemaphore => _llmSemaphore;
 
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
@@ -164,8 +167,12 @@ public class AgentScheduler : IAsyncDisposable
         if (!_agents.TryGetValue(agentId, out var agent))
             return false;
 
-        agent.Status = AgentStatus.Paused;
-        SaveAgentConfig(agent);
+        var agentLock = _agentLocks.GetOrAdd(agentId, _ => new object());
+        lock (agentLock)
+        {
+            agent.Status = AgentStatus.Paused;
+            SaveAgentConfig(agent);
+        }
 
         if (_scheduledCts.TryRemove(agentId, out var cts))
         {
@@ -184,8 +191,12 @@ public class AgentScheduler : IAsyncDisposable
         if (agent.Kind != AgentKind.LongRunning)
             return false;
 
-        agent.Status = AgentStatus.Running;
-        SaveAgentConfig(agent);
+        var agentLock = _agentLocks.GetOrAdd(agentId, _ => new object());
+        lock (agentLock)
+        {
+            agent.Status = AgentStatus.Running;
+            SaveAgentConfig(agent);
+        }
         ScheduleAgent(agent);
 
         _notifications.Post(agent.Name, "Resumed");
@@ -304,23 +315,27 @@ public class AgentScheduler : IAsyncDisposable
             _llmSemaphore.Release();
         }
 
-        agent.LastRunAt = DateTimeOffset.Now;
-        agent.RunCount++;
-
-        if (result.Success)
+        var agentLock = _agentLocks.GetOrAdd(agent.Id, _ => new object());
+        lock (agentLock)
         {
-            agent.LastError = null;
-            if (agent.Kind == AgentKind.Task)
-                agent.Status = AgentStatus.Completed;
-        }
-        else
-        {
-            agent.LastError = result.Error;
-            if (agent.Kind == AgentKind.Task)
-                agent.Status = AgentStatus.Failed;
-        }
+            agent.LastRunAt = DateTimeOffset.Now;
+            agent.RunCount++;
 
-        SaveAgentConfig(agent);
+            if (result.Success)
+            {
+                agent.LastError = null;
+                if (agent.Kind == AgentKind.Task)
+                    agent.Status = AgentStatus.Completed;
+            }
+            else
+            {
+                agent.LastError = result.Error;
+                if (agent.Kind == AgentKind.Task)
+                    agent.Status = AgentStatus.Failed;
+            }
+
+            SaveAgentConfig(agent);
+        }
 
         _mailbox.Post(new MailMessage
         {
@@ -334,6 +349,9 @@ public class AgentScheduler : IAsyncDisposable
 
         _notifications.Post(agent.Name,
             $"New mail: Run #{agent.RunCount} {(result.Success ? "completed" : "failed")}");
+
+        if (agent.Kind == AgentKind.Task)
+            _runningTasks.TryRemove(agent.Id, out _);
     }
 
     private void LoadPersistedAgents()

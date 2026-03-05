@@ -1,0 +1,17 @@
+[Unit]
+Description=SharpClaw Screen Capture Daemon
+Documentation=https://github.com/your/sharpclaw
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/repos/sharpclaw/src/SharpClaw/bin/Debug/net9.0/SharpClaw --daemon
+Restart=on-failure
+RestartSec=10
+Environment=DOTNET_ROOT=/usr/share/dotnet
+
+# Allow access to Wayland/X11 display
+PassEnvironment=DISPLAY WAYLAND_DISPLAY XDG_RUNTIME_DIR
+
+[Install]
+WantedBy=default.target

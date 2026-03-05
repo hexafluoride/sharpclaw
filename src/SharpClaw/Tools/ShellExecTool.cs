@@ -6,8 +6,13 @@ namespace SharpClaw.Tools;
 public class ShellExecTool : ITool
 {
     private readonly string _workspaceDir;
+    private readonly int _defaultTimeoutSeconds;
 
-    public ShellExecTool(string workspaceDir) => _workspaceDir = workspaceDir;
+    public ShellExecTool(string workspaceDir, int defaultTimeoutSeconds = 30)
+    {
+        _workspaceDir = workspaceDir;
+        _defaultTimeoutSeconds = defaultTimeoutSeconds;
+    }
 
     public string Name => "shell_exec";
     public string Description =>
@@ -32,7 +37,7 @@ public class ShellExecTool : ITool
         var command = arguments.GetProperty("command").GetString()
             ?? throw new ArgumentException("Missing 'command' parameter");
 
-        var timeoutSeconds = 30;
+        var timeoutSeconds = _defaultTimeoutSeconds;
         if (arguments.TryGetProperty("timeout_seconds", out var timeoutProp))
             timeoutSeconds = timeoutProp.GetInt32();
 

@@ -9,19 +9,14 @@ using SharpClaw.Tools;
 
 namespace SharpClaw.Agent;
 
-/// <summary>
-/// The agentic reasoning loop, modeled after OpenClaw's pi-embedded-runner.
-/// Load context -> call LLM -> parse tool calls -> execute -> append results -> loop.
-/// Terminates when the LLM produces a final text response with no tool calls,
-/// or when the iteration guard is hit.
-/// </summary>
 public class AgentRuntime
 {
     private readonly SharpClawConfig _config;
     private readonly LlamaCppClient _llmClient;
     private readonly ToolRegistry _toolRegistry;
     private readonly SessionManager _sessionManager;
-    private readonly string _systemPrompt;
+    private string _systemPrompt;
+    private int _estimatedTokens;
 
     public AgentRuntime(
         SharpClawConfig config,
@@ -39,11 +34,6 @@ public class AgentRuntime
         _sessionManager.SetSystemPrompt(systemPrompt);
     }
 
-    /// <summary>
-    /// Process a user message through the reasoning loop.
-    /// Streams text tokens to the provided callback as they arrive.
-    /// Returns the final assistant text response.
-    /// </summary>
     public async Task<string> ProcessAsync(
         string userMessage,
         Action<string>? onToken = null,
@@ -51,6 +41,9 @@ public class AgentRuntime
     {
         var userMsg = Message.User(userMessage);
         _sessionManager.AppendMessage(userMsg);
+        _estimatedTokens += EstimateTokens(userMessage);
+
+        TrimContextIfNeeded(onToken);
 
         var finalText = new StringBuilder();
         var iteration = 0;
@@ -65,6 +58,7 @@ public class AgentRuntime
                 Model = _config.Model,
                 Messages = _sessionManager.Messages.ToList(),
                 Tools = toolDefs.Count > 0 ? toolDefs : null,
+                MaxTokens = _config.MaxCompletionTokens,
                 Stream = true
             };
 
@@ -78,12 +72,11 @@ public class AgentRuntime
                     responseText.Append(chunk.Text);
                     onToken?.Invoke(chunk.Text!);
                 }
-
                 if (chunk.IsToolCall)
-                {
                     toolCalls = chunk.ToolCalls;
-                }
             }
+
+            _estimatedTokens += EstimateTokens(responseText.ToString());
 
             if (toolCalls is { Count: > 0 })
             {
@@ -108,20 +101,19 @@ public class AgentRuntime
 
                     var toolResultMsg = Message.Tool(toolId, toolName, result);
                     _sessionManager.AppendMessage(toolResultMsg);
+                    _estimatedTokens += EstimateTokens(result);
                 }
 
+                TrimContextIfNeeded(onToken);
                 continue;
             }
 
-            // No tool calls: this is the final response
             var text = responseText.ToString();
             if (!string.IsNullOrEmpty(text))
             {
-                var assistantMsg = Message.Assistant(text);
-                _sessionManager.AppendMessage(assistantMsg);
+                _sessionManager.AppendMessage(Message.Assistant(text));
                 finalText.Append(text);
             }
-
             break;
         }
 
@@ -166,19 +158,52 @@ public class AgentRuntime
 
     public void UpdateSystemPrompt(string newPrompt)
     {
+        _systemPrompt = newPrompt;
         _sessionManager.SetSystemPrompt(newPrompt);
     }
 
-    private static string TruncateArgs(string args, int maxLen = 200)
+    private void TrimContextIfNeeded(Action<string>? onToken)
     {
-        if (args.Length <= maxLen) return args;
-        return args[..maxLen] + "...";
+        var threshold = (int)(_config.MaxContextTokens * 0.8);
+        if (_estimatedTokens < threshold) return;
+
+        var messages = _sessionManager.Messages;
+        if (messages.Count < 4) return;
+
+        var keepRecent = Math.Min(6, messages.Count / 2);
+        var trimEnd = messages.Count - keepRecent;
+        if (trimEnd <= 1) return;
+
+        var toSummarize = new StringBuilder();
+        for (int i = 1; i < trimEnd; i++)
+        {
+            var msg = messages[i];
+            var text = msg.GetTextContent() ?? "";
+            if (text.Length > 500) text = text[..500] + "...";
+            toSummarize.AppendLine($"[{msg.Role}]: {text}");
+        }
+
+        var summaryText = $"[Context compacted: {trimEnd - 1} older messages summarized]\n" +
+                          $"Previous conversation covered:\n{toSummarize}";
+
+        _sessionManager.TrimMessages(1, trimEnd, Message.System(
+            $"[Earlier conversation summary]\n{summaryText}"));
+
+        _estimatedTokens = EstimateTokens(_systemPrompt);
+        foreach (var m in _sessionManager.Messages)
+            _estimatedTokens += EstimateTokens(m.GetTextContent() ?? "");
+
+        onToken?.Invoke($"\n[Context trimmed: {trimEnd - 1} messages compacted to stay within context window]\n");
     }
+
+    private static int EstimateTokens(string text) => text.Length / 4;
+
+    private static string TruncateArgs(string args, int maxLen = 200)
+        => args.Length <= maxLen ? args : args[..maxLen] + "...";
 
     private static string TruncateForDisplay(string text, int maxLen = 300)
     {
         var singleLine = text.ReplaceLineEndings(" ");
-        if (singleLine.Length <= maxLen) return singleLine;
-        return singleLine[..maxLen] + "...";
+        return singleLine.Length <= maxLen ? singleLine : singleLine[..maxLen] + "...";
     }
 }

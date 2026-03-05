@@ -1,3 +1,4 @@
+using System.Net;
 using System.Net.Http.Json;
 using System.Runtime.CompilerServices;
 using System.Text;
@@ -10,38 +11,46 @@ public class LlamaCppClient : IDisposable
 {
     private readonly HttpClient _http;
     private readonly string _baseUrl;
+    private readonly int _retryCount;
+    private readonly int _retryBaseDelayMs;
+
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
         PropertyNameCaseInsensitive = true,
         DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
     };
 
-    public LlamaCppClient(string baseUrl)
+    private static readonly HashSet<HttpStatusCode> RetriableStatusCodes =
+    [
+        HttpStatusCode.TooManyRequests,
+        HttpStatusCode.BadGateway,
+        HttpStatusCode.ServiceUnavailable,
+        HttpStatusCode.GatewayTimeout
+    ];
+
+    public LlamaCppClient(string baseUrl, int retryCount = 3, int retryBaseDelayMs = 1000)
     {
         _baseUrl = baseUrl.TrimEnd('/');
+        _retryCount = retryCount;
+        _retryBaseDelayMs = retryBaseDelayMs;
         _http = new HttpClient { Timeout = TimeSpan.FromMinutes(10) };
     }
 
-    /// <summary>
-    /// Non-streaming completion. Returns the full response at once.
-    /// </summary>
     public async Task<ChatResponse> CompleteAsync(ChatRequest request, CancellationToken ct = default)
     {
         request.Stream = false;
-        var url = $"{_baseUrl}/v1/chat/completions";
-        var json = JsonSerializer.Serialize(request, JsonOpts);
-        using var content = new StringContent(json, Encoding.UTF8, "application/json");
-        using var response = await _http.PostAsync(url, content, ct);
-        response.EnsureSuccessStatusCode();
-        var result = await response.Content.ReadFromJsonAsync<ChatResponse>(JsonOpts, ct);
-        return result ?? throw new InvalidOperationException("Empty response from llama.cpp server");
+        return await WithRetryAsync(async () =>
+        {
+            var url = $"{_baseUrl}/v1/chat/completions";
+            var json = JsonSerializer.Serialize(request, JsonOpts);
+            using var content = new StringContent(json, Encoding.UTF8, "application/json");
+            using var response = await _http.PostAsync(url, content, ct);
+            response.EnsureSuccessStatusCode();
+            var result = await response.Content.ReadFromJsonAsync<ChatResponse>(JsonOpts, ct);
+            return result ?? throw new InvalidOperationException("Empty response from llama.cpp server");
+        }, ct);
     }
 
-    /// <summary>
-    /// Streaming completion. Yields partial chunks as SSE events arrive.
-    /// Accumulates tool calls across chunks and yields a final synthetic chunk
-    /// with the complete tool calls when finish_reason is "tool_calls".
-    /// </summary>
     public async IAsyncEnumerable<StreamChunk> StreamAsync(
         ChatRequest request,
         [EnumeratorCancellation] CancellationToken ct = default)
@@ -49,17 +58,33 @@ public class LlamaCppClient : IDisposable
         request.Stream = true;
         var url = $"{_baseUrl}/v1/chat/completions";
         var json = JsonSerializer.Serialize(request, JsonOpts);
-        using var content = new StringContent(json, Encoding.UTF8, "application/json");
 
-        using var httpRequest = new HttpRequestMessage(HttpMethod.Post, url) { Content = content };
-        using var response = await _http.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, ct);
-        response.EnsureSuccessStatusCode();
+        HttpResponseMessage? response = null;
+        for (int attempt = 0; ; attempt++)
+        {
+            try
+            {
+                var content = new StringContent(json, Encoding.UTF8, "application/json");
+                var httpRequest = new HttpRequestMessage(HttpMethod.Post, url) { Content = content };
+                response = await _http.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, ct);
+                response.EnsureSuccessStatusCode();
+                break;
+            }
+            catch (HttpRequestException ex) when (attempt < _retryCount && IsRetriable(ex))
+            {
+                response?.Dispose();
+                var delay = _retryBaseDelayMs * (1 << attempt);
+                await Task.Delay(delay, ct);
+            }
+        }
 
+        using var _ = response!;
         using var stream = await response.Content.ReadAsStreamAsync(ct);
         using var reader = new StreamReader(stream);
 
         var toolCallAccumulator = new Dictionary<int, AccumulatingToolCall>();
         string? finishReason = null;
+        bool receivedDone = false;
 
         while (!reader.EndOfStream)
         {
@@ -71,17 +96,11 @@ public class LlamaCppClient : IDisposable
             if (!line.StartsWith("data: ")) continue;
 
             var data = line["data: ".Length..];
-            if (data == "[DONE]") break;
+            if (data == "[DONE]") { receivedDone = true; break; }
 
             ChatResponse? chunk;
-            try
-            {
-                chunk = JsonSerializer.Deserialize<ChatResponse>(data, JsonOpts);
-            }
-            catch (JsonException)
-            {
-                continue;
-            }
+            try { chunk = JsonSerializer.Deserialize<ChatResponse>(data, JsonOpts); }
+            catch (JsonException) { continue; }
 
             if (chunk?.Choices is not { Count: > 0 }) continue;
             var choice = chunk.Choices[0];
@@ -93,28 +112,21 @@ public class LlamaCppClient : IDisposable
             if (delta?.Content is { } contentElement)
             {
                 var text = contentElement.ValueKind == JsonValueKind.String
-                    ? contentElement.GetString()
-                    : null;
-
+                    ? contentElement.GetString() : null;
                 if (text is not null)
-                {
                     yield return new StreamChunk { Text = text };
-                }
             }
 
             if (delta?.ToolCalls is { Count: > 0 })
             {
                 foreach (var tc in delta.ToolCalls)
                 {
-                    // Use the explicit index from the delta if present,
-                    // otherwise infer from position
                     var idx = tc.Index ?? toolCallAccumulator.Count;
                     var name = tc.ResolvedName;
                     var args = tc.ResolvedArguments;
 
                     if (toolCallAccumulator.TryGetValue(idx, out var existing))
                     {
-                        // Append to existing tool call accumulator
                         if (!string.IsNullOrEmpty(name) && string.IsNullOrEmpty(existing.Name))
                             existing.Name = name;
                         if (!string.IsNullOrEmpty(tc.Id))
@@ -124,7 +136,6 @@ public class LlamaCppClient : IDisposable
                     }
                     else
                     {
-                        // New tool call
                         toolCallAccumulator[idx] = new AccumulatingToolCall
                         {
                             Id = tc.Id ?? $"call_{idx}",
@@ -135,6 +146,9 @@ public class LlamaCppClient : IDisposable
                 }
             }
         }
+
+        if (!receivedDone && finishReason == null && toolCallAccumulator.Count == 0)
+            yield return new StreamChunk { Text = "\n[Warning: stream ended without completion signal]\n", FinishReason = "incomplete" };
 
         if (toolCallAccumulator.Count > 0 &&
             (finishReason == "tool_calls" || finishReason == "stop" || finishReason is null))
@@ -164,6 +178,28 @@ public class LlamaCppClient : IDisposable
     {
         _http.Dispose();
         GC.SuppressFinalize(this);
+    }
+
+    private async Task<T> WithRetryAsync<T>(Func<Task<T>> action, CancellationToken ct)
+    {
+        for (int attempt = 0; ; attempt++)
+        {
+            try { return await action(); }
+            catch (HttpRequestException ex) when (attempt < _retryCount && IsRetriable(ex))
+            {
+                var delay = _retryBaseDelayMs * (1 << attempt);
+                await Task.Delay(delay, ct);
+            }
+        }
+    }
+
+    private static bool IsRetriable(HttpRequestException ex)
+    {
+        if (ex.StatusCode.HasValue && RetriableStatusCodes.Contains(ex.StatusCode.Value))
+            return true;
+        if (ex.InnerException is System.IO.IOException or System.Net.Sockets.SocketException)
+            return true;
+        return false;
     }
 
     private class AccumulatingToolCall

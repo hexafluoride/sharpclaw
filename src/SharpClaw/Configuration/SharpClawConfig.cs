@@ -48,7 +48,34 @@ public class SharpClawConfig
     public string Workspace { get; set; } = "~/.sharpclaw/workspace";
 
     [JsonPropertyName("maxIterations")]
-    public int MaxIterations { get; set; } = 20;
+    public int MaxIterations { get; set; } = 25;
+
+    [JsonPropertyName("maxContextTokens")]
+    public int MaxContextTokens { get; set; } = 120000;
+
+    [JsonPropertyName("maxCompletionTokens")]
+    public int? MaxCompletionTokens { get; set; }
+
+    [JsonPropertyName("shellTimeoutSeconds")]
+    public int ShellTimeoutSeconds { get; set; } = 30;
+
+    [JsonPropertyName("memoryCompactionThreshold")]
+    public int MemoryCompactionThreshold { get; set; } = 4000;
+
+    [JsonPropertyName("subAgentHistoryMessages")]
+    public int SubAgentHistoryMessages { get; set; } = 20;
+
+    [JsonPropertyName("maxMailboxMessages")]
+    public int MaxMailboxMessages { get; set; } = 500;
+
+    [JsonPropertyName("maxNotifications")]
+    public int MaxNotifications { get; set; } = 200;
+
+    [JsonPropertyName("llmRetryCount")]
+    public int LlmRetryCount { get; set; } = 3;
+
+    [JsonPropertyName("llmRetryBaseDelayMs")]
+    public int LlmRetryBaseDelayMs { get; set; } = 1000;
 
     [JsonPropertyName("screen")]
     public ScreenConfig Screen { get; set; } = new();
