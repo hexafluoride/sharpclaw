@@ -48,22 +48,44 @@ public class AgentScheduler : IAsyncDisposable
     }
 
     /// <summary>
-    /// Load persisted agent configs and resume scheduled long-running agents.
+    /// Load persisted agent configs, resume scheduled long-running agents,
+    /// and re-launch any interrupted task agents.
     /// </summary>
     public void Start()
     {
         LoadPersistedAgents();
 
+        var resumedLong = 0;
+        var resumedTasks = 0;
+
         foreach (var agent in _agents.Values)
         {
-            if (agent.Kind == AgentKind.LongRunning && agent.Status == AgentStatus.Running)
+            if (agent.Status != AgentStatus.Running) continue;
+
+            if (agent.Kind == AgentKind.LongRunning)
+            {
                 ScheduleAgent(agent);
+                resumedLong++;
+            }
+            else if (agent.Kind == AgentKind.Task)
+            {
+                var task = Task.Run(async () =>
+                {
+                    try { await RunAgentOnceAsync(agent); }
+                    catch (Exception ex) { _notifications.Post(agent.Name, $"Failed: {ex.Message}"); }
+                });
+                _runningTasks[agent.Id] = task;
+                resumedTasks++;
+            }
         }
 
-        var scheduled = _agents.Values.Count(a =>
-            a.Kind == AgentKind.LongRunning && a.Status == AgentStatus.Running);
-        if (scheduled > 0)
-            _notifications.Post("scheduler", $"Resumed {scheduled} long-running agent(s)");
+        if (resumedLong > 0 || resumedTasks > 0)
+        {
+            var parts = new List<string>();
+            if (resumedLong > 0) parts.Add($"{resumedLong} long-running agent(s)");
+            if (resumedTasks > 0) parts.Add($"{resumedTasks} interrupted task(s)");
+            _notifications.Post("scheduler", $"Resumed {string.Join(", ", parts)}");
+        }
     }
 
     /// <summary>
@@ -328,14 +350,7 @@ public class AgentScheduler : IAsyncDisposable
                 var json = File.ReadAllText(configPath);
                 var agent = JsonSerializer.Deserialize<SubAgentConfig>(json, JsonOpts);
                 if (agent != null)
-                {
-                    // Completed/failed tasks don't need to be loaded as active
-                    if (agent.Kind == AgentKind.Task &&
-                        agent.Status is AgentStatus.Completed or AgentStatus.Failed or AgentStatus.Cancelled)
-                        continue;
-
                     _agents[agent.Id] = agent;
-                }
             }
             catch (Exception ex)
             {
