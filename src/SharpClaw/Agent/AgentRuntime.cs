@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using SharpClaw.Configuration;
@@ -99,9 +100,11 @@ public class AgentRuntime
 
                     onToken?.Invoke($"\n[Tool: {toolName}({TruncateArgs(toolArgs)})]\n");
 
+                    var toolSw = Stopwatch.StartNew();
                     var result = await _toolRegistry.ExecuteAsync(toolName, toolArgs, ct);
+                    toolSw.Stop();
 
-                    onToken?.Invoke($"[Result: {TruncateForDisplay(result)}]\n");
+                    onToken?.Invoke($"[Result: {toolSw.Elapsed.TotalSeconds:F1}s | {TruncateForDisplay(result)}]\n");
 
                     var toolResultMsg = Message.Tool(toolId, toolName, result);
                     _sessionManager.AppendMessage(toolResultMsg);
