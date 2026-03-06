@@ -2,6 +2,8 @@ using System.Text.Json;
 using SharpClaw.Configuration;
 using SharpClaw.LLM;
 using SharpClaw.LLM.Models;
+using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.PixelFormats;
 
 namespace SharpClaw.Screen;
 
@@ -18,6 +20,7 @@ public class ScreenAnalyzer : IDisposable
     private readonly object _lock = new();
     private readonly string _historyPath;
     private string? _lastImageHash;
+    private byte[]? _lastImageSample;
     private int _writesSinceCompactionCheck;
 
     private static readonly JsonSerializerOptions JsonOpts = new()
@@ -52,7 +55,13 @@ public class ScreenAnalyzer : IDisposable
     {
         if (imageHash == _lastImageHash)
             return;
+
+        var sample = SampleImage(imageData);
+        if (sample is not null && _lastImageSample is not null && IsSimilar(_lastImageSample, sample))
+            return;
+
         _lastImageHash = imageHash;
+        _lastImageSample = sample;
 
         try
         {
@@ -335,6 +344,56 @@ public class ScreenAnalyzer : IDisposable
         }
 
         return "";
+    }
+
+    private const int SampleCount = 512;
+    private const double SimilarityThreshold = 0.97;
+
+    /// <summary>
+    /// Decode the image and sample raw pixel luminance values on a grid.
+    /// Uses actual pixels, not compressed bytes, so minor changes (clock, cursor)
+    /// don't avalanche into completely different samples.
+    /// </summary>
+    private static byte[]? SampleImage(byte[] pngData)
+    {
+        try
+        {
+            using var image = Image.Load<Rgba32>(pngData);
+            var w = image.Width;
+            var h = image.Height;
+            if (w == 0 || h == 0) return null;
+
+            var grid = (int)Math.Sqrt(SampleCount);
+            var sample = new byte[SampleCount];
+            var idx = 0;
+            for (int gy = 0; gy < grid && idx < SampleCount; gy++)
+            {
+                var y = (int)((gy + 0.5) * h / grid) % h;
+                for (int gx = 0; gx < grid && idx < SampleCount; gx++)
+                {
+                    var x = (int)((gx + 0.5) * w / grid) % w;
+                    var p = image[x, y];
+                    sample[idx++] = (byte)((p.R * 299 + p.G * 587 + p.B * 114) / 1000);
+                }
+            }
+            return sample;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static bool IsSimilar(byte[] a, byte[] b)
+    {
+        var len = Math.Min(a.Length, b.Length);
+        if (len == 0) return false;
+
+        int matches = 0;
+        for (int i = 0; i < len; i++)
+            if (Math.Abs(a[i] - b[i]) <= 2) matches++;
+
+        return (double)matches / len >= SimilarityThreshold;
     }
 
     public void Dispose()

@@ -68,6 +68,8 @@ public static class ScreenDaemon
 
         var analyzer = new ScreenAnalyzer(config);
 
+        var consecutiveAfkSkips = 0;
+
         async Task OnCapture(byte[] imageData, string hash)
         {
             string? app = null, title = null, url = null;
@@ -77,6 +79,25 @@ public static class ScreenDaemon
             {
                 try
                 {
+                    var afkStatus = await awClient.GetAfkStatusAsync();
+                    if (afkStatus.HasValue)
+                    {
+                        isAfk = afkStatus.Value.isAfk;
+                        if (isAfk == true)
+                        {
+                            consecutiveAfkSkips++;
+                            if (consecutiveAfkSkips <= 1)
+                                log.LogInformation("User is AFK, skipping capture (will suppress further messages)");
+                            return;
+                        }
+                    }
+
+                    if (consecutiveAfkSkips > 0)
+                    {
+                        log.LogInformation("User returned from AFK (skipped {Count} captures)", consecutiveAfkSkips);
+                        consecutiveAfkSkips = 0;
+                    }
+
                     var windowBucket = await awClient.FindBucketAsync("aw-watcher-window");
                     if (windowBucket is not null)
                     {
@@ -99,10 +120,6 @@ public static class ScreenDaemon
                             url = d.TryGetProperty("url", out var u) ? u.GetString() : null;
                         }
                     }
-
-                    var afkStatus = await awClient.GetAfkStatusAsync();
-                    if (afkStatus.HasValue)
-                        isAfk = afkStatus.Value.isAfk;
                 }
                 catch (Exception ex)
                 {
